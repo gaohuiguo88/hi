@@ -4,32 +4,47 @@ from torch_geometric.data import InMemoryDataset
 from torch_geometric.data import Data
 import numpy as np
 from numpy import linalg as LA
+import argparse
+import warnings
+
+warnings.filterwarnings('ignore')
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument('--epochs', type=int, default=400,
+                    help='Number of epochs to train')
+parser.add_argument('--K', type=int, default=25,
+                    help='Number of filter order')
+parser.add_argument('--batch_size', type=int, default=100,
+                    help='Size of the batch')
+                    
+args = parser.parse_args()
 
 # generate the dataset
-p = 0.8
-q = 0.1
-num_node = 100
-C = 5
-K = 1
-block_size = (num_node / C * torch.ones(C,1)).squeeze().long()
-edge_prob = q*torch.ones(C,C)
-for i in range(C):
-    edge_prob[i,i] = p
+# p = 0.8
+# q = 0.1
+# num_node = 100
+# C = 5
+# K = 1
+# block_size = (num_node / C * torch.ones(C,1)).squeeze().long()
+# edge_prob = q*torch.ones(C,C)
+# for i in range(C):
+#     edge_prob[i,i] = p
 
-data_list = []
-for i in range(2500):
-    edge_index = torch_geometric.utils.stochastic_blockmodel_graph(block_size,edge_prob)
-    x = torch.randn(num_node,1)
-    y = (sum(x.squeeze())/num_node * torch.ones(num_node,1))
-    data = Data(x=x,y=y,edge_index=edge_index)
-
-    data_list.append(data)
-torch.save(data_list,'./data/data.pt')
-print(data_list[0])
+# data_list = []
+# for i in range(2500):
+#     edge_index = torch_geometric.utils.stochastic_blockmodel_graph(block_size,edge_prob)
+#     x = torch.randn(num_node,1)
+#     y = (sum(x.squeeze())/num_node * torch.ones(num_node,1))
+#     data = Data(x=x,y=y,edge_index=edge_index)
+# 
+#     data_list.append(data)
+# torch.save(data_list,'./data.pt')
+# print(data_list[0])
 
 # split the data
 from torch_geometric.data import DataLoader
-data_list = torch.load('./data/data.pt')
+data_list = torch.load('./data.pt')
 train_data = data_list[:2000]
 val_data = data_list[2000:2250]
 test_data = data_list[2250:]
@@ -111,6 +126,7 @@ class GCN(nn.Module):
         return x
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = 'cpu'
 model = GCN(nfeat=1,nhid=32,K = 2,nclasses=1)
 model.to(device)
 optimizer = optim.Adam(model.parameters(),lr=1e-2, weight_decay=5e-4)
@@ -118,29 +134,43 @@ crit = torch.nn.MSELoss()
 
 
 # get the normalized adjacency matrix
-from numpy import linalg as LA
+import scipy.sparse as sp
+from scipy.sparse.linalg import eigs, eigsh
+
+def normalize(mx):
+    rowsum = np.array(mx.sum(1))
+    r_inv = np.power(rowsum, -1).flatten()
+    r_inv[np.isinf(r_inv)] = 0.
+    r_mat_inv = sp.diags(r_inv)
+    mx = r_mat_inv.dot(mx)
+    return mx
 
 def getNormalizedAdj(data):
-    A = torch.zeros(data.x.shape[0],data.x.shape[0])
-    A.to(device)
-    for i in range(len(data.edge_index[1])//2):
-        A[data.edge_index[0,2*i].numpy(),data.edge_index[0,2*i+1].numpy()] = 1
-        A[data.edge_index[1,2*i].numpy(),data.edge_index[1,2*i+1].numpy()] = 1
-    w, v = LA.eig(A)
-    A = A / max(abs(w))
-    return A
+    row = data.edge_index[0].cpu()
+    col = data.edge_index[1].cpu()
+    raw_data = torch.ones(data.edge_index.shape[1])
+#    raw_data = raw_data.to(device)
+
+    adj = sp.coo_matrix((raw_data, (row, col)), shape=(data.x.shape[0], data.x.shape[0])).toarray()
+    
+
+    evals_large, evecs_large = eigsh(adj, 1, which='LM')
+    adj = torch.Tensor(adj/evals_large)
+    
+    adj = adj.to(device)
+    
+    return adj
 
 # train the model
 import time
-
+from tqdm import tqdm
 def train(epoch):
     t = time.time()
     model.train()
-    for data in train_dataloader:
+    for data in tqdm(train_dataloader):
         data.to(device)
         optimizer.zero_grad()
         adj = getNormalizedAdj(data)
-#         print(adj.shape)
         output = model(data.x, adj).squeeze()
         loss_train = crit(output,data.y.squeeze())
         loss_train.backward()
@@ -161,5 +191,7 @@ def train(epoch):
           'loss_val: {:.4f}'.format(loss_val.item()),
           'time: {:.4f}s'.format(time.time() - t))
 
-for epoch in range(1):
+for epoch in range(args.epochs):
     train(epoch)
+
+torch.save(model,'./model.pt')
